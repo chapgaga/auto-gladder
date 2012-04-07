@@ -29,8 +29,17 @@ class NetworkPkgData:
 
 class AbstractStack:
     def __init__(self, parent=None, data=None):
-        self.parent = None
-        if data: self.parse(data)
+        self.parent = parent
+        if parent is None:      # this is the root
+            self.root = self
+        else:
+            self.root = self.parent.root
+
+        if data: 
+            self.parse(data)
+            self.payload = data[self.headlen:]
+
+        self.do()
 
     def do(self):
         "protocol actions"
@@ -39,11 +48,38 @@ class AbstractStack:
     def fork(self, **kwargs):
         stack = copy(self)
         for k, v in kwargs.items():
-            if not v in stack: print "Warning, unknown property:", k
+            if not hasattr(stack, k): print "Warning, unknown property:", k
             if v: setattr(stack, k, v)
+            if v is None: delattr(stack, k)
             
         return stack        
 
+    def pack(self, payload, peek=None): raise NotImplemented
+    def parse(self): raise NotImplemented
+
+    def dump(self):
+        print "====== DUMP:%s =======" % repr(self.__class__)
+        for k in dir(self):
+            if hasattr(self.__class__, k): continue
+            print k,':', repr(getattr(self, k))
+              
+        print '--------------'
+
+    def send(self, *stacks):
+        vif = self.root.vif     # get tun interface from root
+        
+        payload=""
+        stacks = stacks[::-1]
+        for peek_stack, stack in zip(stacks[1:]+(None,), stacks): # pack stack from top to bottom
+            payload = stack.pack(payload, peek_stack)
+#            stack.dump()
+
+        vif.write(payload)
+
+class DataStack(AbstractStack):
+    def __init__(self, payload): self.payload = payload
+    def pack(self, payload, peek=None): return self.payload
+        
 def test():
     pkg = NetworkPkgData("abcdef")
     print pkg[1:5].as_str()     # bcdef

@@ -61,7 +61,7 @@ class TCPStack(AbstractStack):
             length = ord(option_data[p])
 
             p+=1
-            if kind == 2:     # MAX segment_size
+            if kind == 2:       # MAX segment_size
                 self.option_max_segment_size = unpack('!H', option_data[p:p+2])
             elif kind == 3:     # Window scale factor
                 self.option_window_scale_factor = ord(option_data[p])
@@ -85,7 +85,7 @@ class TCPStack(AbstractStack):
             print "TCP SYNC:", pair
 
             cp = TCPStack.ConnectionPair
-            pool = self.parent.parent.pool
+            pool = self.root.pool
             if pair in cp: # weird!
                 print "Warning, duplicated connection on tcp sync stage"
             cp[pair] = TCPStatus(self)
@@ -94,7 +94,7 @@ class TCPStack(AbstractStack):
             pair = self.get_connection_pair()
             cp = TCPStack.ConnectionPair
             try:
-                cp[pair].queue.put(('outcome', self))
+                cp[pair].queue.put(('outcome', None, self))
             except KeyError:    # a connection without SYN, drop
                 pass
                 
@@ -138,7 +138,7 @@ class TCPStack(AbstractStack):
 #        import ipdb; ipdb.set_trace()
 
         if len(opt) % 4 >0:     # we have remaining
-            opt+="\x01" * (4-(len(opt) % 4)) # use NOP to fill, make it 32 length aligned
+            opt+="\x01" * (4-(len(opt) % 4)) # use NOP to fill, make it 4 bytes aligned
         return opt
 
     def get_connection_pair(self):
@@ -180,25 +180,26 @@ class TCPStack(AbstractStack):
         buf = deque()
         resend_buf = deque()
 
-
-        while True:             # send SYN|ACK repeatly until we got the final ACK
+        while True:             # send SYN|ACK repeatly until we get the final ACK
             print "send syn/ack"
             try:
                 option_timestamp = (timestamp(),self.option_timestamp[0])
             except:
                 option_timestamp = None
 
-            self.send(self.parent.fork(src_ip = pair[2], dst_ip = pair[0]), # IP Layer
-                      self.fork(src_port = pair[3], dst_port = pair[1], # TCP Layer
-                                flags = SYN | ACK,
-                                ack_num = ts.remote_seq_num, 
-                                seq_num = ts.seq_num, # synced package, seq 1
-                                window = 14480,
-                                option_window_scale_factor=None,
-                                option_timestamp= option_timestamp,
-                            )
-                  )
-            tag, pkg = ts.queue.get(timeout=0.1)
+            self.send(
+                self.parent.fork(src_ip = pair[2], dst_ip = pair[0]), # IP Layer
+                self.fork(src_port = pair[3], dst_port = pair[1], # TCP Layer
+                          flags = SYN | ACK,
+                          ack_num = ts.remote_seq_num, 
+                          seq_num = ts.seq_num, # synced package, seq 1
+                          window = 14480,
+                          option_window_scale_factor=None,
+                          option_timestamp= option_timestamp,
+                      )
+            )
+            tag, pkg_fd, pkg = ts.queue.get(timeout=0.1)
+
             if tag == 'outcome': # we received response
                 ts.seq_num = pkg.ack_num
                 try:
@@ -210,7 +211,7 @@ class TCPStack(AbstractStack):
 
         # Connection established
 
-        ASIO.connect(ts.sock, ts.queue)
+        ASIO.connect(ts.sock.fileno(), ts.queue)
         
         seq_num = ts.seq_num    # remember base
         remote_seq_num = ts.remote_seq_num # remember base
@@ -256,7 +257,7 @@ class TCPStack(AbstractStack):
                 else:           # we don't have cached data, send a bare ACK
                     payload = ''
 
-                if payload or time.time()-ts.last_ack_send > 0.2: # we must send it now, no more delay
+                if payload or time.time()-ts.last_ack_send > 0.2: # we must send it now, no more delay 
                     print "outcome, send ack"
                     self.send_response(ts, payload)
         

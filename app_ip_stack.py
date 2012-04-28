@@ -1,4 +1,4 @@
-from abstracts import AbstractStack
+from abstracts import AbstractStack, register_stacks
 
 from app_tcp_stack import TCPStack
 from app_udp_stack import UDPStack
@@ -11,6 +11,11 @@ import struct
 from utils import pack, unpack, checksum
 
 class IPStack(AbstractStack):
+    """
+    Application IP Stack
+      - IP package encoding and decoding
+      - need to support IP fragment
+    """
     def parse(self, incoming_data):
         data = [ord(x) for x in incoming_data[:20]]
         self.version = data[0] >> 4
@@ -49,3 +54,4 @@ class IPStack(AbstractStack):
         return s1+s2+s3+s4+s5+s6+s7+s8+s9+s10+s11+payload
 
 
+register_stacks('_ipstack', IPStack)

@@ -2,18 +2,17 @@
 from select import epoll, EPOLLIN
 import thread, os
 import time
-from threading import Condition
+#from threading import Condition
 
 class AsyncIO:
     "connect network socket with Queue"
     def __init__(self):
         self.fd_pool={}         # fd -> queue mapping
         self.epoll = epoll()
-        self.cond = Condition()
+#        self.cond = Condition()
         thread.start_new_thread(self.loop, ())
 
-    def connect(self, sock, queue):
-        fd = sock.fileno()
+    def connect(self, fd, queue):
         print "### register:", fd
         self.fd_pool[fd]=queue
         self.epoll.register(fd, EPOLLIN)
@@ -37,7 +36,7 @@ class AsyncIO:
                 if not data:    # pipe broken! remove it
                     self.disconnect(fd)
                     continue
-                self.fd_pool[fd].put(('income', data))
+                self.fd_pool[fd].put(('income', fd, data))
 
     def disconnect(self, fd):
         print "### disconnect:", fd

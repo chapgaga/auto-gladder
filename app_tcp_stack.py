@@ -196,7 +196,8 @@ class TCPStack(AbstractStack):
                           window = 14480,
                           option_window_scale_factor=None,
                           option_timestamp= option_timestamp,
-                      )
+                      ),
+                debug=1,
             )
             tag, pkg_fd, pkg = ts.queue.get(timeout=0.1)
 
@@ -217,11 +218,11 @@ class TCPStack(AbstractStack):
         remote_seq_num = ts.remote_seq_num # remember base
         while True:
             try:
-                tag, pkg = ts.queue.get(timeout=0.1)
-                print tag, repr(pkg)
+                tag, pkg_fd, pkg = ts.queue.get(timeout=0.1)
+#                print tag, repr(pkg)
             except Empty:
                 tag = 'check_buf'
-                if buf: print tag, buf
+#                if buf: print tag, buf
 
             if tag == 'income': # incoming data from relay node, cache first
                 buf.append(pkg)
@@ -232,7 +233,7 @@ class TCPStack(AbstractStack):
                 except:
                     ts.last_timestamp = 0
 
-                print "outcome seq:", ts.remote_seq_num, ts.seq_num, pkg.seq_num, pkg.ack_num, repr(pkg.payload)
+#                print "outcome seq:", ts.remote_seq_num, ts.seq_num, pkg.seq_num, pkg.ack_num, repr(pkg.payload)
 
                 # first, check this is a valid package
                 if pkg.ack_num == ts.seq_num and ts.seq_num!=seq_num: # is it a retransmited package? (make a exception for first package)
@@ -241,7 +242,7 @@ class TCPStack(AbstractStack):
                     ts.last_ack_send = 0 # we must force to sent ACK
                 elif pkg.payload:  # assume it is a normal package, check payload
                     # we have payload, forward to relay node
-                    print "outcome, send payload:", repr(pkg.payload)
+#                    print "outcome, send payload:", repr(pkg.payload)
                     ts.sock.send(pkg.payload)
 #                    ts.sock.flush()
 
@@ -264,7 +265,7 @@ class TCPStack(AbstractStack):
             elif tag == 'check_buf': # we don't have outcoming data, 
                 if buf:         # however, we do have cached incoming data, send to vif
                     payload = "".join(buf)
-                    print "check buf, send payload:", repr(payload)
+#                    print "check buf, send payload:", repr(payload)
                     buf.clear()
 
                     #  and send ACK
@@ -276,7 +277,7 @@ class TCPStack(AbstractStack):
         if ts.last_timestamp: option_timestamp = (timestamp(),ts.last_timestamp)
         else: option_timestamp = None
 
-        print "SEQ:", ts.seq_num, "ACK:", ts.remote_seq_num, "payload:", repr(payload)
+#        print "SEQ:", ts.seq_num, "ACK:", ts.remote_seq_num, "payload:", repr(payload)
         self.send(self.parent.fork(src_ip = ts.dst_ip, dst_ip = ts.src_ip), # IP Layer, reverse src and dst, because this is a ACK routine
                   self.fork(src_port = ts.dst_port, dst_port = ts.src_port, # TCP Layer
                             flags = ACK | PUSH,

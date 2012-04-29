@@ -134,8 +134,9 @@ class AbstractStack:
 
         for peek_stack, stack in zip(stacks[1:]+(None,), stacks): # pack stack from top to bottom
             if debug: stack.dump()
-
+#            print "previous payload:", repr(payload)
             payload = stack.pack(payload, peek_stack)
+#            print "new payload:", repr(payload)
 
         if debug: print "[Send Debug] PAYLOAD:", repr(payload)
 
@@ -144,8 +145,9 @@ class AbstractStack:
         else:                   # the last stack isn't mac, we need to create one
             assert isinstance(stacks[-1], AbstractStack._ipstack)
             def operate():
-                payload = self._macstack.new_from_ip(stacks[-1]).pack(stacks[-1].payload, None)
-                pif.write(payload)
+                ipstack = stacks[-1]
+                payload2 = self._macstack.new_from_ip(ipstack).pack(payload, None)
+                pif.write(payload2)
             try:
                 operate()
             except ARPLookupException, e:

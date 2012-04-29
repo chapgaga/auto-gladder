@@ -41,6 +41,7 @@ class PhyInterface(VirtualInterface):
         self.ifd = self.s.fileno()
 
     def write(self, buf):
+        print "write len:", len(buf)
         return raw_sendto(self.ifname, self.s, buf)
 
 

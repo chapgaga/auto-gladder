@@ -8,7 +8,8 @@ class ProxyInterface:
     def get_connection(self, dst_addr):
         s = socket(AF_INET, SOCK_STREAM)
         dst_port = dst_addr[1]
-        s.connect(("192.168.1.20", dst_port)) # a fake connection used for testing only
+        dst_ip   = ".".join([str(x) for x in dst_addr[0]])
+        s.connect((dst_ip, dst_port)) # a fake connection used for testing only
         fd = s.fileno()
         self.connect_fds [fd] = s # cache it to avoid GC
         print "connected:", fd

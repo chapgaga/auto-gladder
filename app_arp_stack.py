@@ -14,9 +14,11 @@ class _ARPTable:
     rtable={}
     padding={}
     def update(self, ip, mac):
+        print "arp table update:", ip, repr(mac)
         self.table[ip]=mac
         self.rtable[mac]=ip
         if ip in self.padding:
+#            import ipdb; ipdb.set_trace()
             for op in self.padding[ip]:
                 op()
             del self.padding[ip]

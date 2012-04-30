@@ -6,6 +6,7 @@ Environment = _env()
 Environment.default_if = 'eth0' # note: will be overrided by auto detection
 Environment.virtual_if_mac = "\x74\x34\x76\x0a\x01\x01"
 Environment.virtual_if_ip  = (192,168,1,200)
+Environment.MTU_TCP        = 1402
 
 def bring_if_up(vif_name):
     script=['ifconfig %(vif_name)s %(vif_ip)s',

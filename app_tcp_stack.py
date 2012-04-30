@@ -8,6 +8,7 @@ from utils import unpack, pack, checksum, inc_with_mod
 import os
 from collections import deque
 import time
+from environment import Environment
 
 
 def timestamp():
@@ -216,18 +217,27 @@ class TCPStack(AbstractStack):
         
         seq_num = ts.seq_num    # remember base
         remote_seq_num = ts.remote_seq_num # remember base
+        presend = 0                        # presend mode
         while True:
             try:
-                tag, pkg_fd, pkg = ts.queue.get(timeout=0.1)
-#                print tag, repr(pkg)
+                if presend:     # we are in presend mode, check buf directly
+                    tag = 'check_buf'
+                    print 'tag:', tag, "presend:", presend
+                else:           # buf empty? check queue
+                    tag, pkg_fd, pkg = ts.queue.get(timeout=0.1)
+                    print "tag:", tag, 
+                    if tag == 'income': print 'len:', len(pkg)
+                    else: print "pkg:", pkg
             except Empty:
-                tag = 'check_buf'
-#                if buf: print tag, buf
+                tag = 'check_buf' # queue empty? chech buf again
+                if buf: print 'tag:', tag, "buf len:", len(buf)
 
             if tag == 'income': # incoming data from relay node, cache first
+                while len(pkg)>Environment.MTU_TCP: # frag if needed
+                    buf.append(pkg[:Environment.MTU_TCP])
+                    pkg = pkg[Environment.MTU_TCP:]
                 buf.append(pkg)
             elif tag == 'outcome': # outcoming data from internal net, send to relay node, and send ack to vif, carry incoming data if we have
-
                 try:
                     ts.last_timestamp = pkg.option_timestamp[0]
                 except:
@@ -254,7 +264,12 @@ class TCPStack(AbstractStack):
                     
                 # send ACK
                 if buf:         # we have cached incoming data, send it with ACK carried
-                    payload = buf.popleft()                    
+                    payload = buf.popleft() 
+                    if not presend: # enter presend mode
+                        presend = 3 
+                    else:       # decrease presend count
+                        presend -= 1
+                    
                 else:           # we don't have cached data, send a bare ACK
                     payload = ''
 
@@ -264,12 +279,14 @@ class TCPStack(AbstractStack):
         
             elif tag == 'check_buf': # we don't have outcoming data, 
                 if buf:         # however, we do have cached incoming data, send to vif
-                    payload = "".join(buf)
-#                    print "check buf, send payload:", repr(payload)
-                    buf.clear()
+                    payload = buf.popleft()
+                    print "check buf, payload len:", len(payload)
+#                    buf.clear()
 
                     #  and send ACK
                     self.send_response(ts, payload)
+                else:           # buf empty, exit presend mode
+                    presend = 0 
 
     def send_response(self, tcp_status, payload=''):
         ts = tcp_status
@@ -277,7 +294,7 @@ class TCPStack(AbstractStack):
         if ts.last_timestamp: option_timestamp = (timestamp(),ts.last_timestamp)
         else: option_timestamp = None
 
-#        print "SEQ:", ts.seq_num, "ACK:", ts.remote_seq_num, "payload:", repr(payload)
+        print "SEQ:", ts.seq_num, "ACK:", ts.remote_seq_num, "payload:", repr(payload)
         self.send(self.parent.fork(src_ip = ts.dst_ip, dst_ip = ts.src_ip), # IP Layer, reverse src and dst, because this is a ACK routine
                   self.fork(src_port = ts.dst_port, dst_port = ts.src_port, # TCP Layer
                             flags = ACK | PUSH,

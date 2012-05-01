@@ -42,6 +42,7 @@ class TCPStatus:
         self.running = 1
         self.ahead = -1       # ahead mode disabled
         self.resend_buf = deque()
+        self.fin = False
 
         # debug only
         self.outcome_seq_base = self.outcome_seq
@@ -84,6 +85,9 @@ class TCPStatus:
         send payload
         if ahead mode is on, check if we need to sendit or wait for ack or resend previous data
         """
+
+        print "send:", len(data), self.ahead
+
         seq = self.outcome_seq
         self.outcome_seq += len(data)
 
@@ -116,36 +120,45 @@ class TCPStatus:
             self.first = False
             if pkg.payload: 
                 self.sock.send(pkg.payload) # forward to relay node
-                inc_with_mod(self.income_seq, 0xffffffff, len(pkg.payload))
+                self.income_seq = inc_with_mod(self.income_seq, 0xffffffff, len(pkg.payload))
 
+        if pkg.flags & FIN:       # FIN?
+#            print "pkg flag:", pkg.flags, pkg.flags & FIN
+            if not self.fin:        # already in fin
+                self.close()
+            else:
+                self.send_response(self.outcome_seq, "")
+                print "put done"
+                self.queue.put(('done', 0, ''))
         self.acked_outcome_seq = pkg.ack_num
+        if self.ahead>=0: self.ahead=3
         self.clean_resend_buf()
 
     def clean_resend_buf(self):
         while self.resend_buf:
             peek=self.resend_buf[0]
             d = distance_with_mod(peek[0], self.acked_outcome_seq, 0xffffffff)
-            print "clean, d:", d
+#            print "clean, d:", d
             if d<0:
                 self.resend_buf.popleft()
             else: break
     
 
-    def send_response(self, seq, payload=''):
+    def send_response(self, seq, payload='', fin=0):
         """
         send tcp response(with ack)
         """
         if self.last_timestamp: option_timestamp = (timestamp(), self.last_timestamp)
         else: option_timestamp = None
 
-        print "SEQ:", distance_with_mod(seq, self.outcome_seq_base, 0xffffffff), \
+        print 'FIN:',self.fin, "SEQ:", distance_with_mod(seq, self.outcome_seq_base, 0xffffffff), \
             "ACK:", distance_with_mod(self.income_seq, self.income_seq_base, 0xffffffff), \
             "payload:", len(payload), repr(payload[:40])
 
         ts = self.tcp_stack
         ts.send(ts.parent.fork(src_ip = self.dst_ip, dst_ip = self.src_ip), # IP Layer, reverse src and dst, because this is a ACK routine
                 ts.fork(src_port = self.dst_port, dst_port = self.src_port, # TCP Layer
-                        flags = ACK | PUSH,
+                        flags = ACK | PUSH | fin,
                         window = 14480,
                         ack_num = self.income_seq,
                         seq_num = seq,
@@ -164,11 +177,15 @@ class TCPStatus:
         """
         resend previous package
         """
-        print "in resend"
         for seq, data in self.resend_buf:
+            if seq == -1:       # we reached end
+                self.fin = True
+                self.send_response(self.outcome_seq, "", fin=FIN)
+                self.queue.put(('check_buf', 0, 0))
+                return
             print "check seq", distance_with_mod(seq, self.outcome_seq_base, 0xffffffff), \
                 distance_with_mod(self.acked_outcome_seq, self.outcome_seq_base, 0xffffffff), \
-                distance_with_mod(self.outcome_seq, self.outcome_seq_base, 0xffffffff), data[:40]
+                distance_with_mod(self.outcome_seq, self.outcome_seq_base, 0xffffffff), repr(data[:40])
 
             d = distance_with_mod(seq, self.acked_outcome_seq, 0xffffffff)
             print "d:", d
@@ -179,8 +196,13 @@ class TCPStatus:
             if self.ahead<=0:
                 self.send_response(self.outcome_seq,"")
                 self.ahead=3
-            
+
+        if self.resend_buf:
+            self.queue.put(('check_buf', 0, 0))
         
+    def close(self):
+        self.resend_buf.append((-1, '')) 
+
 
 SYN=2
 FIN=1
@@ -328,8 +350,17 @@ class TCPStack(AbstractStack):
                 ts.resend_routine()
                 continue
 
+            print "   ###### tag:", tag
             if tag == 'from_external': # download data from relay node, forward to internal net
                 ts.send(pkg)
             elif tag == 'from_internal': # outcoming data to relay node
                 ts.receive(pkg)
+            elif tag == 'check_buf':
+                ts.resend_routine()
+            elif tag == 'close':
+                ts.close()
+            elif tag == 'done':
+                break
+
+        print "tcp closed"
 

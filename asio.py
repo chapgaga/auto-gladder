@@ -36,6 +36,7 @@ class AsyncIO:
             for fd, evt in ret:
                 data = os.read(fd, 4096)
                 if not data:    # pipe broken! remove it
+                    print "disconnect"
                     self.disconnect(fd)
                     continue
                 queue = self.fd_pool[fd]
@@ -43,11 +44,14 @@ class AsyncIO:
                 if queue.mtu:                    # frag needed!
                     while len(data) > queue.mtu: # frag
                         queue.put((queue.tag, fd, data[:queue.mtu]))
+                        print "put data in queue:", repr(data[:20])
                         data = data[queue.mtu:]
                 queue.put((queue.tag, fd, data))
+                print "put data in queue:", repr(data[:20])
 
     def disconnect(self, fd):
         print "### disconnect:", fd
+        self.fd_pool[fd].put(('close', fd, ''))
         self.epoll.unregister(fd)
         del self.fd_pool[fd]
 

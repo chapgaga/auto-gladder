@@ -10,6 +10,15 @@ def pack(fstr, data):
 def inc_with_mod(data, mod, v=1):
     return (data+v) & mod
 
+def distance_with_mod(n1, n2, mod):
+    diff = n1-n2
+    if abs(diff) < mod / 2: return diff
+
+    # overlap!
+    if diff<0: diff+=mod
+    else: diff-=mod
+    return diff
+
 if struct.pack("H",1) == "\x00\x01": # big endian
     def checksum(pkt):
         if len(pkt) % 2 == 1:

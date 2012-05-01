@@ -4,7 +4,7 @@ from threadpool import *
 from Queue import Queue, Empty
 from asio import ASIO
 from proxy import Proxy
-from utils import unpack, pack, checksum, inc_with_mod
+from utils import unpack, pack, checksum, inc_with_mod, distance_with_mod
 import os
 from collections import deque
 import time
@@ -19,9 +19,168 @@ QUEUE_LENGTH = 128
 DATA_QUEUE_LENGTH = 1024
 class TCPStatus:
     def __init__(self, tcp_stack):
+        # stack instance
         self.tcp_stack = tcp_stack
-        self.status='syn'
-        self.queue = Queue(QUEUE_LENGTH)
+
+        pair = tcp_stack.get_connection_pair()
+        # init destination and source
+        self.src_ip , self.src_port = pair[0], pair[1]
+        self.dst_ip , self.dst_port = pair[2], pair[3]
+
+        # init proxy socket
+        self.sock = Proxy.get_connection(pair[2:])
+
+        # init data IO queue
+        self.queue = Queue(DATA_QUEUE_LENGTH)
+
+        # init outcome_seq
+        self.acked_outcome_seq = self.outcome_seq = abs(id(self)) & 0xffffffff # generate outcome seq according to id(self)
+        self.income_seq  = inc_with_mod(tcp_stack.seq_num, 0xffffffff) # remote sequence, add 1 to indicate we've received
+        self.last_ack_send = 0
+        self.last_ack_count = 0
+
+        self.running = 1
+        self.ahead = -1       # ahead mode disabled
+        self.resend_buf = deque()
+
+        # debug only
+        self.outcome_seq_base = self.outcome_seq
+        self.income_seq_base = self.income_seq
+
+    def hand_shake(self):
+        tcp_stack = self.tcp_stack
+        while self.running:             # send SYN|ACK repeatly until we get the final ACK
+            try:
+                option_timestamp = (timestamp(), tcp_stack.option_timestamp[0])
+            except:
+                option_timestamp = None
+
+            tcp_stack.send(
+                tcp_stack.parent.fork(src_ip = self.dst_ip, dst_ip = self.src_ip), # IP Layer, reverse src/dst ip pair
+                tcp_stack.fork(src_port = self.dst_port, dst_port = self.src_port, # TCP Layer, reverse src/dst port pair
+                          flags = SYN | ACK, # handshake, SYN|ACK
+                          ack_num = self.income_seq, 
+                          seq_num = self.outcome_seq, # synced package, seq 0
+                          window = 14480,
+                          option_window_scale_factor=None,
+                          option_timestamp= option_timestamp,
+                      ),
+            )
+            tag, pkg_fd, pkg = self.queue.get(timeout=0.1)
+
+            if tag == 'from_internal': # we received response
+                self.acked_outcome_seq = self.outcome_seq = pkg.ack_num
+                try:
+                    self.last_timestamp = pkg.option_timestamp[0]
+                except:
+                    self.last_timestamp = 0
+                break
+
+        self.first=True         # special case for first received package
+        print "connection established"
+
+    def send(self, data):
+        """
+        send payload
+        if ahead mode is on, check if we need to sendit or wait for ack or resend previous data
+        """
+        seq = self.outcome_seq
+        self.outcome_seq += len(data)
+
+        self.resend_buf.append((seq, data))
+        if self.ahead<0:        # ahead mode disabled
+            self.send_response(seq, data)
+            self.ahead=3        # enter ahead mode
+        elif self.ahead==0:     # reached ahead countdown, wait for ack
+            # do nothing, leave the works for the resend routine
+            pass
+        else:
+            self.send_response(seq, data)
+            self.ahead-=1
+
+    def receive(self, pkg):
+        """
+        receive package, update self param
+        pkg: tcp_stack
+        """
+        try:
+            self.last_timestamp = pkg.option_timestamp[0]
+        except:
+            self.last_timestamp = 0
+
+        # check duplicate
+        #if pkg.ack_num == self.outcome_seq and self.outcome_seq != self.first_outcome_seq
+        diff = distance_with_mod(pkg.ack_num, self.outcome_seq, 0xffffffff)
+        print "recv, diff:", diff, repr(pkg.payload[:40])
+        if diff >0 or self.first:
+            self.first = False
+            if pkg.payload: 
+                self.sock.send(pkg.payload) # forward to relay node
+                inc_with_mod(self.income_seq, 0xffffffff, len(pkg.payload))
+
+        self.acked_outcome_seq = pkg.ack_num
+        self.clean_resend_buf()
+
+    def clean_resend_buf(self):
+        while self.resend_buf:
+            peek=self.resend_buf[0]
+            d = distance_with_mod(peek[0], self.acked_outcome_seq, 0xffffffff)
+            print "clean, d:", d
+            if d<0:
+                self.resend_buf.popleft()
+            else: break
+    
+
+    def send_response(self, seq, payload=''):
+        """
+        send tcp response(with ack)
+        """
+        if self.last_timestamp: option_timestamp = (timestamp(), self.last_timestamp)
+        else: option_timestamp = None
+
+        print "SEQ:", distance_with_mod(seq, self.outcome_seq_base, 0xffffffff), \
+            "ACK:", distance_with_mod(self.income_seq, self.income_seq_base, 0xffffffff), \
+            "payload:", len(payload), repr(payload[:40])
+
+        ts = self.tcp_stack
+        ts.send(ts.parent.fork(src_ip = self.dst_ip, dst_ip = self.src_ip), # IP Layer, reverse src and dst, because this is a ACK routine
+                ts.fork(src_port = self.dst_port, dst_port = self.src_port, # TCP Layer
+                        flags = ACK | PUSH,
+                        window = 14480,
+                        ack_num = self.income_seq,
+                        seq_num = seq,
+                        option_timestamp = option_timestamp,
+                        option_SACK_Permit = None,
+                        option_max_segment_size = None,
+                        option_window_scale_factor=None,
+                        
+                    ),
+                DataStack(payload),
+            )
+        self.last_ack_send = time.time()
+        self.last_ack_count = 0
+
+    def resend_routine(self):
+        """
+        resend previous package
+        """
+        print "in resend"
+        for seq, data in self.resend_buf:
+            print "check seq", distance_with_mod(seq, self.outcome_seq_base, 0xffffffff), \
+                distance_with_mod(self.acked_outcome_seq, self.outcome_seq_base, 0xffffffff), \
+                distance_with_mod(self.outcome_seq, self.outcome_seq_base, 0xffffffff), data[:40]
+
+            d = distance_with_mod(seq, self.acked_outcome_seq, 0xffffffff)
+            print "d:", d
+            if d>=0:
+                self.send_response(seq, data)
+                break
+        else:                   # send ack?
+            if self.ahead<=0:
+                self.send_response(self.outcome_seq,"")
+                self.ahead=3
+            
+        
 
 SYN=2
 FIN=1
@@ -95,7 +254,7 @@ class TCPStack(AbstractStack):
             pair = self.get_connection_pair()
             cp = TCPStack.ConnectionPair
             try:
-                cp[pair].queue.put(('outcome', None, self))
+                cp[pair].queue.put(('from_internal', None, self))
             except KeyError:    # a connection without SYN, drop
                 pass
                 
@@ -154,159 +313,23 @@ class TCPStack(AbstractStack):
 
     def _tcp_forward(self, tcp_status):
         ts = tcp_status
-        pair = self.get_connection_pair()
-        ts.src_ip , ts.src_port = pair[0], pair[1]
-        ts.dst_ip , ts.dst_port = pair[2], pair[3]
-
-        dst_addr = pair[2:]
-        try:
-            sock = Proxy.get_connection(dst_addr)
-        except Exception,e:                 # connection timeout, reset, ... ...
-            import traceback
-            traceback.print_exc()
-            pass
-        # connected, send back syn ack
-        ts.sock = sock
-        ts.queue = Queue(DATA_QUEUE_LENGTH)
-
-        # send SYN/ACK response pkg
-        seq_num = id(ts)
-        if seq_num<0: seq_num = -seq_num
-        ts.seq_num = seq_num & 0xffffffff #  init self seq, which is seq 0
-
-        ts.remote_seq_num = inc_with_mod(self.seq_num, 0xffffffff) # receive remote seq, which is remote seq 0
-        ts.last_ack_send = time.time()
-
-
-        buf = deque()
-        resend_buf = deque()
-
-        while True:             # send SYN|ACK repeatly until we get the final ACK
-            print "send syn/ack"
-            try:
-                option_timestamp = (timestamp(),self.option_timestamp[0])
-            except:
-                option_timestamp = None
-
-            self.send(
-                self.parent.fork(src_ip = pair[2], dst_ip = pair[0]), # IP Layer
-                self.fork(src_port = pair[3], dst_port = pair[1], # TCP Layer
-                          flags = SYN | ACK,
-                          ack_num = ts.remote_seq_num, 
-                          seq_num = ts.seq_num, # synced package, seq 1
-                          window = 14480,
-                          option_window_scale_factor=None,
-                          option_timestamp= option_timestamp,
-                      ),
-                debug=1,
-            )
-            tag, pkg_fd, pkg = ts.queue.get(timeout=0.1)
-
-            if tag == 'outcome': # we received response
-                ts.seq_num = pkg.ack_num
-                try:
-                    ts.last_timestamp = pkg.option_timestamp[0]
-                except:
-                    ts.last_timestamp = 0
-                break
-        print "connection established"
+        ts.hand_shake()
 
         # Connection established
 
-        ASIO.connect(ts.sock.fileno(), ts.queue)
+        ASIO.connect(ts.sock.fileno(), ts.queue, mtu=Environment.MTU_TCP, tag='from_external')
         
-        seq_num = ts.seq_num    # remember base
-        remote_seq_num = ts.remote_seq_num # remember base
-        presend = 0                        # presend mode
+        # handshake done
+
         while True:
             try:
-                if presend:     # we are in presend mode, check buf directly
-                    tag = 'check_buf'
-                    print 'tag:', tag, "presend:", presend
-                else:           # buf empty? check queue
-                    tag, pkg_fd, pkg = ts.queue.get(timeout=0.1)
-                    print "tag:", tag, 
-                    if tag == 'income': print 'len:', len(pkg)
-                    else: print "pkg:", pkg
-            except Empty:
-                tag = 'check_buf' # queue empty? chech buf again
-                if buf: print 'tag:', tag, "buf len:", len(buf)
+                tag, pkg_fd, pkg = ts.queue.get(timeout=0.1)
+            except Empty:   # IO queue empty
+                ts.resend_routine()
+                continue
 
-            if tag == 'income': # incoming data from relay node, cache first
-                while len(pkg)>Environment.MTU_TCP: # frag if needed
-                    buf.append(pkg[:Environment.MTU_TCP])
-                    pkg = pkg[Environment.MTU_TCP:]
-                buf.append(pkg)
-            elif tag == 'outcome': # outcoming data from internal net, send to relay node, and send ack to vif, carry incoming data if we have
-                try:
-                    ts.last_timestamp = pkg.option_timestamp[0]
-                except:
-                    ts.last_timestamp = 0
+            if tag == 'from_external': # download data from relay node, forward to internal net
+                ts.send(pkg)
+            elif tag == 'from_internal': # outcoming data to relay node
+                ts.receive(pkg)
 
-#                print "outcome seq:", ts.remote_seq_num, ts.seq_num, pkg.seq_num, pkg.ack_num, repr(pkg.payload)
-
-                # first, check this is a valid package
-                if pkg.ack_num == ts.seq_num and ts.seq_num!=seq_num: # is it a retransmited package? (make a exception for first package)
-                    seq_num=-1
-                    payload = ""
-                    ts.last_ack_send = 0 # we must force to sent ACK
-                elif pkg.payload:  # assume it is a normal package, check payload
-                    # we have payload, forward to relay node
-#                    print "outcome, send payload:", repr(pkg.payload)
-                    ts.sock.send(pkg.payload)
-#                    ts.sock.flush()
-
-                    # increase remote_seq_num counter, send ACK latter.
-                    ts.remote_seq_num = inc_with_mod(ts.remote_seq_num, 0xffffffff, len(pkg.payload))
-
-                    # update my ACK
-                    ts.seq_num = pkg.ack_num
-                    
-                # send ACK
-                if buf:         # we have cached incoming data, send it with ACK carried
-                    payload = buf.popleft() 
-                    if not presend: # enter presend mode
-                        presend = 3 
-                    else:       # decrease presend count
-                        presend -= 1
-                    
-                else:           # we don't have cached data, send a bare ACK
-                    payload = ''
-
-                if payload or time.time()-ts.last_ack_send > 0.2: # we must send it now, no more delay 
-                    print "outcome, send ack"
-                    self.send_response(ts, payload)
-        
-            elif tag == 'check_buf': # we don't have outcoming data, 
-                if buf:         # however, we do have cached incoming data, send to vif
-                    payload = buf.popleft()
-                    print "check buf, payload len:", len(payload)
-#                    buf.clear()
-
-                    #  and send ACK
-                    self.send_response(ts, payload)
-                else:           # buf empty, exit presend mode
-                    presend = 0 
-
-    def send_response(self, tcp_status, payload=''):
-        ts = tcp_status
-
-        if ts.last_timestamp: option_timestamp = (timestamp(),ts.last_timestamp)
-        else: option_timestamp = None
-
-        print "SEQ:", ts.seq_num, "ACK:", ts.remote_seq_num, "payload:", repr(payload)
-        self.send(self.parent.fork(src_ip = ts.dst_ip, dst_ip = ts.src_ip), # IP Layer, reverse src and dst, because this is a ACK routine
-                  self.fork(src_port = ts.dst_port, dst_port = ts.src_port, # TCP Layer
-                            flags = ACK | PUSH,
-                            window = 14480,
-                            ack_num = ts.remote_seq_num,
-                            seq_num = ts.seq_num,
-                            option_timestamp = option_timestamp,
-                            option_SACK_Permit = None,
-                            option_max_segment_size = None,
-                            option_window_scale_factor=None,
-                            
-                        ),
-                  DataStack(payload),
-        )
-        ts.last_ack_send = time.time()

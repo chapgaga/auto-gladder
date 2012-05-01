@@ -12,9 +12,11 @@ class AsyncIO:
 #        self.cond = Condition()
         thread.start_new_thread(self.loop, ())
 
-    def connect(self, fd, queue):
+    def connect(self, fd, queue, mtu=0, tag='income'):
         print "### register:", fd
-        self.fd_pool[fd]=queue
+        self.fd_pool[fd] = queue
+        queue.mtu = mtu
+        queue.tag = tag
         self.epoll.register(fd, EPOLLIN)
 
     def loop(self):
@@ -36,7 +38,13 @@ class AsyncIO:
                 if not data:    # pipe broken! remove it
                     self.disconnect(fd)
                     continue
-                self.fd_pool[fd].put(('income', fd, data))
+                queue = self.fd_pool[fd]
+
+                if queue.mtu:                    # frag needed!
+                    while len(data) > queue.mtu: # frag
+                        queue.put((queue.tag, fd, data[:queue.mtu]))
+                        data = data[queue.mtu:]
+                queue.put((queue.tag, fd, data))
 
     def disconnect(self, fd):
         print "### disconnect:", fd
